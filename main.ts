@@ -20,18 +20,28 @@ set(0x31, 1, 0); set(0x32, 1, 0); // JZ, JNZ
 set(0x40, 1, 1); set(0x41, 2, 0); // LOAD, STORE
 set(0x50, 1, 0); set(0x51, 1, 0); set(0x52, 0, 1); set(0x53, 1, 0); // PRINT PUTC IN EXIT
 
+// ISA limits, from generator/subject/ISA.md.
+const STEP_LIMIT = 1000000;
+const OUT_LIMIT = 65536;
+const STACK_CAP = 256;
+const CALL_CAP = 64;
+const MEM_WORDS = 256;
+
+// Decode a little-endian signed 16-bit value (jump offsets).
+const s16 = (lo: number, hi: number): number => ((lo | (hi << 8)) << 16) >> 16;
+
 function run(p: Uint8Array, inp: Uint8Array): [Uint8Array, number] {
   const n = p.length;
-  const D = new Int32Array(256); // data stack
+  const D = new Int32Array(STACK_CAP); // data stack
   let sp = 0;
-  const C = new Int32Array(64); // call stack
+  const C = new Int32Array(CALL_CAP); // call stack
   let cp = 0;
-  const M = new Int32Array(256); // memory
-  const out = new Uint8Array(65536);
+  const M = new Int32Array(MEM_WORDS); // memory
+  const out = new Uint8Array(OUT_LIMIT);
   let ol = 0, ip = 0, pc = 0, steps = 0;
   const done = (code: number): [Uint8Array, number] => [out.slice(0, ol), code];
   for (;;) {
-    if (steps === 1000000) return done(10); // step limit
+    if (steps === STEP_LIMIT) return done(10); // step limit
     if (pc < 0 || pc >= n) return done(9); // pc outside the program
     const op = p[pc];
     if (!ok[op]) return done(5); // unknown opcode
@@ -40,7 +50,7 @@ function run(p: Uint8Array, inp: Uint8Array): [Uint8Array, number] {
     steps++;
     const next = pc + 1 + imm;
     if (sp < po[op]) return done(2); // stack underflow
-    if (sp - po[op] + pu[op] > 256) return done(3); // stack overflow
+    if (sp - po[op] + pu[op] > STACK_CAP) return done(3); // stack overflow
     pc = next;
     switch (op) {
       case 0x00: return done(0); // HALT
@@ -86,14 +96,14 @@ function run(p: Uint8Array, inp: Uint8Array): [Uint8Array, number] {
         break;
       }
       case 0x30: case 0x31: case 0x32: { // JMP, JZ, JNZ
-        const rel = ((p[next - 2] | (p[next - 1] << 8)) << 16) >> 16;
+        const rel = s16(p[next - 2], p[next - 1]);
         let take = true;
         if (op !== 0x30) { const v = D[--sp]; take = op === 0x31 ? v === 0 : v !== 0; }
         if (take) pc = next + rel;
         break;
       }
       case 0x33: // CALL
-        if (cp === 64) return done(7);
+        if (cp === CALL_CAP) return done(7);
         C[cp++] = next;
         pc = p[next - 2] | (p[next - 1] << 8);
         break;
@@ -116,14 +126,14 @@ function run(p: Uint8Array, inp: Uint8Array): [Uint8Array, number] {
       }
       case 0x50: { // PRINT, decimal ASCII, no newline
         const bs = enc.encode(String(D[sp - 1]));
-        if (ol + bs.length > 65536) return done(11);
+        if (ol + bs.length > OUT_LIMIT) return done(11);
         sp--;
         out.set(bs, ol);
         ol += bs.length;
         break;
       }
       case 0x51: // PUTC, one byte
-        if (ol + 1 > 65536) return done(11);
+        if (ol + 1 > OUT_LIMIT) return done(11);
         out[ol++] = D[--sp] & 255;
         break;
       case 0x52: // IN, -1 once the input is used up
